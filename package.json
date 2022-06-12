@@ -1,7 +1,7 @@
 {
   "name": "@apostrophecms/sql",
   "version": "1.0.0",
-  "description": "Use MySQL, Postgres, SQLite, etc. in place of MongoDB with ApostropheCMS",
+  "description": "A MongoDB-like API wrapper for SQL databases such as sqlite, mysql and postgres",
   "main": "index.js",
   "scripts": {
     "test": "mocha"
@@ -29,5 +29,8 @@
     "knex": "^2.1.0",
     "mocha": "^10.0.0",
     "sqlite3": "^5.0.8"
+  },
+  "engines": {
+    "node": ">=16.9.0"
   }
 }

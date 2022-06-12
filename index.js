@@ -3,12 +3,26 @@ const { EJSON } = require('bson');
 const cuid = require('cuid');
 
 module.exports = ({ knex }) => {
+  const names = new Set();
   return {
-    collection(name) {
-      return collection(name);
+    db(name) {
+      if (name) {
+        if ((names.size > 0) && !names.has(name)) {
+          throw new Error('@apostrophecms/sql is not currently able to manage multiple databases through one client connection');
+        }
+        names.add(name);
+      }
+      return {
+        collection(name) {
+          return collection(name);
+        },
+        close() {
+          return knex.destroy();
+        }
+      };
     },
-    close() {
-      return knex.destroy();
+    isConnected() {
+      return true;
     }
   };
   function collection(name) {
@@ -63,60 +77,137 @@ module.exports = ({ knex }) => {
       },
       async createIndex(fields, options = {}) {
         await self.ready();
-        const columnNames = Object.keys(fields);
+        const columnNames = Object.keys(fields).map(mangleName);
         self.indexes.push({
           fields,
           options
         });
+        const alterations = [];
         for (const columnName of columnNames) {
           if (!await knex.schema.hasColumn(name, columnName)) {
-            await knex.schema.alterTable(name, table => {
+            alterations.push(table => {
               table.string(columnName);
             });
           }
         }
-        await knex.table.alterTable(name, table => {
+        alterations.push(table => {
           if (options.unique) {
             table.unique(columnNames);
           } else {
             table.index(columnNames);
           }
         });
+        try {
+          await knex.schema.alterTable(name, table => {
+            for (const alteration of alterations) {
+              alteration(table);
+            }
+          });
+        } catch (e) {
+          // knex has no portable way to list existing indexes,
+          // so giving them names and checking for those names isn't
+          // useful. This test works for sqlite3, we'll need more
+          // of these
+          if (!e.toString().includes('already exists')) {
+            throw e;
+          }
+        }
       },
-      find(criteria) {
+      find(criteria = {}) {
         return query(self, criteria);
       },
-      async findOne(criteria) {
-        return (await query(self, criteria).limit(1).toArray())[0];
+      async count(criteria = {}) {
+        return self.countDocuments(criteria);
       },
-      // TODO completely unoptimized memory hog
+      async countDocuments(criteria = {}) {
+        // TODO because of the need for sift() for some queries this won't always be optimizable
+        // but sometimes it is and the pain of fetching everything just to count it,
+        // with no projection, is obviously terrible
+        return (await self.find(criteria).toArray()).length;
+      },
+      async findOne(criteria = {}) {
+        return (await self.find(criteria).limit(1).toArray())[0];
+      },
+      async deleteOne(criteria = {}) {
+        // TODO we need the query because of sift, but in simple cases
+        // involving indexed columns or _id we can optimize it away
+        const matching = (await query(self, criteria).limit(1).toArray())[0];
+        if (!matching) {
+          return {
+            result: {
+              nDeleted: 0
+            }
+          };
+        }
+        const n = await knex(name).where('_id', matching._id).delete();
+        return {
+          result: {
+            nDeleted: n
+          }
+        };
+      },
+      async deleteMany(criteria = {}) {
+        // TODO we need the query because of sift, but in simple cases
+        // involving indexed columns or _id we can optimize it away
+        const matching = await query(self, criteria).limit(1).toArray();
+        const ids = matching.map(match => match._id);
+        if (!ids.length) {
+          return {
+            result: {
+              nDeleted: 0
+            }
+          };  
+        }
+        const n = await knex(name).whereIn('_id', ids).delete();
+        return {
+          result: {
+            nDeleted: n
+          }
+        };
+      },
+      async removeOne(criteria = {}) {
+        return self.deleteOne(criteria);
+      },
+      async removeMany(criteria = {}) {
+        return self.deleteMany(criteria);
+      },
+      // TODO we need the query because of sift, but in simple cases
+      // involving only indexed columns and _id we can optimize it away
       async distinct(propertyName, criteria = {}) {
         return [...new Set((await query(self, criteria).toArray()).map(value => value[propertyName]))];
       },
       async insertOne(doc) {
         await self.ready();
-        await knex(name).insert(prepareForInsert(indexes, doc));
-        return {
-          result: {
-            nModified: 1
-          }
-        };
+        try {
+          await knex(name).insert(prepareForInsert(self.indexes, doc));
+          return {
+            result: {
+              nModified: 1
+            }
+          };
+        } catch (e) {
+          throw compatibleError(e);
+        }
       },
       async insertMany(docs) {
         await self.ready();
-        // TODO more performant batch insert
-        for (const doc of docs) {
-          await knex(name).insert(prepareForInsert(indexes, doc));
-        }
-        return {
-          result: {
-            nModified: docs.length
+        try {
+          // TODO more performant batch insert
+          for (const doc of docs) {
+            await knex(name).insert(prepareForInsert(self.indexes, doc));
           }
-        };
+          return {
+            result: {
+              nModified: docs.length
+            }
+          };
+        } catch (e) {
+          throw compatibleError(e);
+        }
       },
       async replaceOne(doc) {
         await self.ready();
-        await knex(name).update(prepareForUpdate(indexes, doc)).where('_id', '=', doc._id);
+        await knex(name).update(prepareForUpdate(self.indexes, doc)).where('_id', '=', doc._id);
         return {
           result: {
             nModified: 1
@@ -124,10 +215,13 @@ module.exports = ({ knex }) => {
         };
       },
       // TODO operators are not atomic, that's bad
-      async updateOne(criteria, operations) {
+      async updateOne(criteria, operations, options = {}) {
         await self.ready();
         const doc = await self.findOne(criteria);
         if (!doc) {
+          if (options.upsert) {
+            return self.insertOne(operations.$set);
+          }
           return {
             result: {
               nModified: 0
@@ -147,9 +241,12 @@ module.exports = ({ knex }) => {
                 delete doc[prop];
               }
               break;
+            // TODO this isn't atomic and can lead to race conditions, we can
+            // fix that by creating a column for any property that gets
+            // manipulated by $inc on first use of $inc
             case '$inc':
               for (const [ prop, increment ] of Object.entries(value)) {
-                if (!has(doc, prop)) {
+                if (!Object.hasOwn(doc, prop)) {
                   doc[prop] = 0;
                 }
                 doc[prop] += increment;
@@ -169,17 +266,20 @@ module.exports = ({ knex }) => {
               throw new Error(`@apostrophecms/sql does not support ${key}`);
           }
         }
-        await knex(name).update(doc).where('id', '=', doc._id);
+        await knex(name).update(prepareForUpdate(self.indexes, doc)).where('_id', '=', doc._id);
         return {
           result: {
             nModified: 1
           }
         };
       },
-      async updateMany(criteria, operations) {
+      async updateMany(criteria, operations, options = {}) {
         await self.ready();
         // TODO do this in reasonable batches to avoid wasting memory
         const docs = await self.find(criteria).toArray();
+        if (options.upsert && !docs.length) {
+          return self.insertOne(operations.$set);
+        }
         for (const doc of docs) {
           // TODO reasonable parallelism
           await updateBody(doc, operations);
@@ -206,15 +306,16 @@ module.exports = ({ knex }) => {
         limitParam = n;
         return self;
       },
+      project(projection = {}) {
+        // TODO we can't do a lot here but we could
+        // support projections of _id only and we should
+        // definitely fake it by filtering the result
+        // at the end
+        return self;
+      },
       async toArray() {
         await collection.ready();
         const query = knex(collection.name);
-        if (skipParam) {
-          query.offset(skipParam);
-        }
-        if (limitParam) {
-          query.offset(limitParam);
-        }
         if (sortParams) {
           const orderBy = [];
           for (const [ columnName, direction ] of Object.entries(sortParams)) {
@@ -230,7 +331,7 @@ module.exports = ({ knex }) => {
           for (const columnName of Object.keys(index.fields)) {
             const value = deepGet(criteria, columnName);
             if ((value !== undefined) && ((typeof value) !== 'object')) {
-              query.andWhere(() => {
+              query.andWhere(function() {
                 this.where(columnName, '=', value);
               });
             } else {
@@ -242,7 +343,19 @@ module.exports = ({ knex }) => {
         // if the criteria would have reduced it to a reasonable response
         const results = await query;
         const sifter = sift(criteria);
-        return results.filter(row => sifter(EJSON.parse(row._ext_json))).map(row => EJSON.parse(row._ext_json));
+        let filtered = results.filter(row => sifter(EJSON.parse(row._ext_json))).map(row => EJSON.parse(row._ext_json));
+        // TODO this can be quite inefficient but because of the need for the sifter a naive
+        // use of "offset" and "limit" would produce missing results. Optimize this away in cases
+        // where the SQL query can include everything, and in cases where we can't do that,
+        // query for batches at a time in hopes that we get to stop short of looking at every
+        // record in the table
+        if (skipParam) {
+          filtered = filtered.slice(skipParam);
+        }
+        if (limitParam) {
+          filtered = filtered.slice(0, limitParam);
+        }
+        return filtered;
       }
     }
     return self;
@@ -255,31 +368,51 @@ module.exports = ({ knex }) => {
 // undefined if none exists.
 
 function deepGet(criteria, key) {
-  if (has(criteria, key)) {
+  if (Object.hasOwn(criteria, key)) {
     return criteria[key];
   }
   for (const value of Object.values(criteria.$and || [])) {
-    const found = deepGet(value, key);
-    if ((typeof found) !== 'undefined') {
-      return found;
+    if (value) {
+      const found = deepGet(value, key);
+      if ((typeof found) !== 'undefined') {
+        return found;
+      }
     }
   }
   return undefined;
 }
 
-function has(object, key) {
-  return Object.hasOwnProperty.call(object, key);
-}
-
-function prepareForInsert(indexes, doc) {
+function prepareForUpdate(indexes, doc) {
   const row = {
-    _id: doc._id || cuid(),
+    _id: doc._id,
     _ext_json: EJSON.stringify(doc)
   };
   for (const index of indexes) {
-    for (const columnName of index) {
-      row[columnName] = doc[columnName];
+    for (const field of Object.keys(index.fields)) {
+      row[mangleName(field)] = deepGet(doc, field);
     }
   }
   return row;
+}
+
+function prepareForInsert(indexes, doc) {
+  return {
+    ...prepareForUpdate(indexes, doc),
+    _id: doc._id || cuid()
+  };
+}
+
+function mangleName(name) {
+  return name.replace(/\./g, '__');
+}
+
+function compatibleError(e) {
+  if (e.code === 'SQLITE_CONSTRAINT') {
+    const error = new Error('Not Unique');
+    // Apostrophe is expecting this error code for unique keys
+    error.code = 11000;
+    return error;
+  } else {
+    return e;
+  }
 }

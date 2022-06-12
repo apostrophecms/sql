@@ -5,7 +5,8 @@ describe('sql', function () {
 
   const dbFile = `${__dirname}/test.sqlite`;
   let knex;
-  let sql;
+  let client;
+  let db;
   let docs;
 
   before(function() {
@@ -25,12 +26,16 @@ describe('sql', function () {
   });
 
   it('should return an object', function() {
-    sql = require('../index.js')({ knex });
-    assert(sql);
+    client = require('../index.js')({ knex });
+    assert(client);
+  });
+
+  it('should return a db', function() {
+    db = client.db('test');
   });
 
   it('should return a collection', function() {
-    docs = sql.collection('docs');
+    docs = db.collection('docs');
     assert(docs);
   });
 
@@ -54,7 +59,6 @@ describe('sql', function () {
   it('should find all documents with toArray', async function() {
     const result = await docs.find({}).toArray();
     assert(result);
-    console.log(result);
     assert.strictEqual(result.length, 3);
   });
 
@@ -63,7 +67,6 @@ describe('sql', function () {
       name: 'pypy'
     }).toArray();
     assert(result);
-    console.log(result);
     assert.strictEqual(result.length, 1);
     assert(result[0].name === 'pypy');
     assert(result[0].fur === 'black');
@@ -76,6 +79,10 @@ describe('sql', function () {
     assert(result);
     assert(result.name === 'pypy');
     assert(result.fur === 'black');
+  });
+
+  it('should count documents', async function() {
+    assert.strictEqual(await docs.countDocuments(), 3);
   });
 
 });

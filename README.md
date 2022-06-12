@@ -1,6 +1,12 @@
 # @apostrophecms/sql
 
-Not everyone wants to use MongoDB. This module provides the option of using any SQL database fully compatible with the popular [knex](http://knexjs.org/) query builder for Node.js. this module gives ApostropheCMS access to your database of choice through an interface compatible with a subset MongoDB query syntax.
+## Stability: pre-alpha, work in progress
+
+This module is not ready for practical use.
+
+## About
+
+A MongoDB-like API wrapper for SQL databases such as sqlite, mysql and postgreSQL. This module provides the option of using any SQL database fully compatible with the popular [knex](http://knexjs.org/) query builder for Node.js. That gives ApostropheCMS access to your database of choice through an interface compatible with a subset MongoDB query syntax.
 
 `sqlite3` is a popular choice with this module because it allows you to use a local file for your database, which is OK for small projects and means you don't have to set up a database server at all.
 
@@ -25,8 +31,11 @@ const shortName = 'mysite';
 const knex = require('knex')({
   client: 'sqlite3',
   connection: {
-    filename: `./data/${shortName}.sqlite`
-  }
+    // other databases have different connection options
+    filename: `./data/${shortName}.sqlite`,
+  },
+  // required with sqlite
+  useNullAsDefault: true
 });
 
 const sql = require('@apostrophecms/sql')({
