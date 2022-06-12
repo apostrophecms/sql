@@ -179,7 +179,9 @@ module.exports = ({ knex }) => {
       async insertOne(doc) {
         await self.ready();
         try {
-          await knex(name).insert(prepareForInsert(self.indexes, doc));
+          const insert = knex(name).insert(prepareRow(self.indexes, doc, true));
+          console.log(insert.toString());
+          await insert;
           return {
             result: {
               nModified: 1
@@ -194,7 +196,9 @@ module.exports = ({ knex }) => {
         try {
           // TODO more performant batch insert
           for (const doc of docs) {
-            await knex(name).insert(prepareForInsert(self.indexes, doc));
+            const insert = knex(name).insert(prepareRow(self.indexes, doc, true));
+            console.log(insert.toString());
+            await insert;
           }
           return {
             result: {
@@ -207,7 +211,9 @@ module.exports = ({ knex }) => {
       },
       async replaceOne(doc) {
         await self.ready();
-        await knex(name).update(prepareForUpdate(self.indexes, doc)).where('_id', '=', doc._id);
+        const update = knex(name).update(prepareRow(self.indexes, doc, false)).where('_id', '=', doc._id);
+        console.log(update.toString());
+        await update;
         return {
           result: {
             nModified: 1
@@ -279,7 +285,10 @@ module.exports = ({ knex }) => {
               throw new Error(`@apostrophecms/sql does not support ${key}`);
           }
         }
-        await knex(name).update(prepareForUpdate(self.indexes, doc)).where('_id', '=', doc._id);
+        console.log('###', doc);
+        const update = knex(name).update(prepareRow(self.indexes, doc, false)).where('_id', '=', doc._id);
+        console.log(update.toString());
+        await update;
         return {
           result: {
             nModified: 1
@@ -398,7 +407,13 @@ function deepGet(criteria, key) {
   return undefined;
 }
 
-function prepareForUpdate(indexes, doc) {
+function prepareRow(indexes, doc, inserting) {
+  if (inserting && !doc._id) {
+    doc = {
+      ...doc,
+      _id: cuid()
+    };
+  }
   const row = {
     _id: doc._id,
     _ext_json: EJSON.stringify(doc)
@@ -409,13 +424,6 @@ function prepareForUpdate(indexes, doc) {
     }
   }
   return row;
-}
-
-function prepareForInsert(indexes, doc) {
-  return {
-    ...prepareForUpdate(indexes, doc),
-    _id: doc._id || cuid()
-  };
 }
 
 function mangleName(name) {
