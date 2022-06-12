@@ -231,6 +231,19 @@ module.exports = ({ knex }) => {
         return self.updateBody(doc, operations);
       },
       async updateBody(doc, operations) {
+        if (operations.$currentDate) {
+          operations = {
+            ...operations
+          };
+          const now = new Date();
+          operations.$set = {
+            ...(operations.$set || {})
+          };
+          for (const key of Object.keys(operations.$currentDate)) {
+            operations.$set[key] = now;
+          }
+          delete operations.$currentDate;
+        }
         for (const [ key, value ] of Object.entries(operations)) {
           switch(key) {
             case '$set':
@@ -282,7 +295,7 @@ module.exports = ({ knex }) => {
         }
         for (const doc of docs) {
           // TODO reasonable parallelism
-          await updateBody(doc, operations);
+          await self.updateBody(doc, operations);
         }
       }
       // TODO limited support for aggregation queries
@@ -356,6 +369,9 @@ module.exports = ({ knex }) => {
           filtered = filtered.slice(0, limitParam);
         }
         return filtered;
+      },
+      async count() {
+        return (await self.toArray()).length;
       }
     }
     return self;
